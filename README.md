@@ -8,6 +8,12 @@ public Integration API, and could change or break on a controller update).
 
 Vanilla HTML/JS/CSS frontend, no build step. Single-user, LAN-only.
 
+## AI Code
+
+This is code written by claude so it is indeed AI slop. 
+I used claude to put this together after reverse engineering the API needed for this.
+Feel free to use whats in here for a non AI slop porject
+
 ## Auth
 
 The app has an in-page login screen (username + password for your UniFi
