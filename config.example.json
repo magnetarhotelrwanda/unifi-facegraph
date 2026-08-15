@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy this file to config.json and set your controller's host. config.json is gitignored.",
+
+  "_host_help": "IP or hostname of your UniFi Protect controller / UDM, e.g. 192.168.1.1 (no scheme, no port needed if using the default UniFi OS 443).",
+  "host": "192.168.1.1"
+}

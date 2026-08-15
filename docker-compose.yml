@@ -1,0 +1,9 @@
+services:
+  unifi-facegraph:
+    build: .
+    ports:
+      - "5151:5151"
+    environment:
+      # Your Protect controller/UDM's IP or hostname.
+      - PROTECT_HOST=192.168.1.1
+    restart: unless-stopped

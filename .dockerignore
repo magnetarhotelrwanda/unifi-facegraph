@@ -1,0 +1,8 @@
+.git
+.claude
+__pycache__/
+*.pyc
+.DS_Store
+venv/
+.venv/
+config.json

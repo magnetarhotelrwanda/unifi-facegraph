@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>UniFi FaceGraph</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header>
+  <h1>UniFi FaceGraph</h1>
+  <div class="header-actions">
+    <span id="status-line" class="status-line"></span>
+    <a href="/cluster" class="secondary-link hidden" id="cluster-link">Cluster Unknowns</a>
+    <a href="/recognize" class="secondary-link hidden" id="recognize-link">Face Recognition</a>
+    <button id="refresh-btn" class="hidden">Refresh</button>
+    <button id="logout-btn" class="hidden secondary">Log out</button>
+  </div>
+</header>
+
+<section id="login-section" class="login-section hidden">
+  <form id="login-form" class="login-form">
+    <h2 id="login-heading">Log in to your UniFi controller</h2>
+    <p class="hint" id="login-hint">Credentials are sent directly to your controller and are never saved to disk &mdash; only the resulting session is kept in memory while this server is running.</p>
+    <div id="login-credentials-fields">
+      <label>
+        Username
+        <input type="text" id="login-username" autocomplete="username" required />
+      </label>
+      <label>
+        Password
+        <input type="password" id="login-password" autocomplete="current-password" required />
+      </label>
+    </div>
+    <label id="login-mfa-field" class="hidden">
+      2FA code
+      <input type="text" id="login-mfa" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" />
+    </label>
+    <button type="submit" id="login-submit">Log in</button>
+    <p id="login-error" class="login-error hidden"></p>
+  </form>
+</section>
+
+<main id="app-content" class="hidden">
+  <section id="known-section">
+    <h2>Known Faces <span class="count" id="known-count"></span></h2>
+    <p class="hint">Click a person to view their detections. Select unknown detections below first, then click a person here to assign them.</p>
+    <div id="known-grid" class="grid"></div>
+  </section>
+
+  <section id="unknown-section">
+    <h2>Unknown Detections <span class="count" id="unknown-count"></span></h2>
+    <p class="hint"><span id="selected-count">0</span> selected &mdash; click cards to select/deselect.</p>
+    <div class="create-person-form">
+      <input type="text" id="create-person-name" placeholder="New person's name" />
+      <button id="create-person-btn" disabled>Name selected as new person</button>
+    </div>
+    <div id="unknown-grid" class="grid"></div>
+  </section>
+
+  <section id="group-detail-section" class="hidden">
+    <div class="group-detail-topbar">
+      <button id="group-detail-back" class="secondary">&larr; Back</button>
+      <button id="group-detail-delete" class="danger">Delete this person</button>
+    </div>
+    <div class="group-detail-header">
+      <img id="group-detail-avatar" class="avatar group-detail-avatar" alt="" />
+      <div>
+        <h2 id="group-detail-name"></h2>
+        <p class="hint" id="group-detail-meta"></p>
+      </div>
+    </div>
+    <p class="hint"><span id="group-detail-selected-count">0</span> selected &mdash; click cards to select/deselect, then unassign or reassign below.</p>
+    <div id="group-detail-grid" class="grid"></div>
+    <div class="group-detail-actions">
+      <button id="group-detail-unassign" class="danger" disabled>Unassign selected (back to unknown)</button>
+    </div>
+    <h3>Reassign selected to another person</h3>
+    <div id="group-detail-reassign-grid" class="grid"></div>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/common.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Cluster Unknowns - UniFi FaceGraph</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header>
+  <h1>Cluster Unknowns <span class="hint">(local model)</span></h1>
+  <div class="header-actions">
+    <a href="/recognize" class="secondary-link">Face Recognition</a>
+    <a href="/" class="secondary-link">&larr; Back to main</a>
+    <button id="logout-btn" class="secondary">Log out</button>
+  </div>
+</header>
+
+<main id="app-content">
+  <section id="run-section">
+    <p class="hint">
+      Compares every current unknown detection against every <em>other</em> unknown detection
+      (not against known people) and groups the ones that look like the same face together &mdash;
+      useful for spotting a recurring unidentified face (e.g. "the postman") so you can name or
+      assign a whole batch at once, without needing to already have them assigned to someone.
+    </p>
+
+    <div class="run-controls">
+      <label>
+        Date range
+        <div class="date-range-inputs">
+          <input type="date" id="range-start" />
+          <span class="hint">to</span>
+          <input type="date" id="range-end" />
+        </div>
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="range-all" />
+        Process all unknown detections (ignore date range above)
+      </label>
+    </div>
+
+    <button id="run-btn">Compute embeddings</button>
+    <div id="progress-area" class="hidden">
+      <p id="progress-text" class="hint"></p>
+    </div>
+  </section>
+
+  <section id="cluster-controls-section" class="hidden">
+    <div class="run-controls">
+      <label>
+        Similarity threshold: <span id="threshold-value">45%</span>
+        <input type="range" id="cluster-threshold" min="0" max="100" value="45" />
+      </label>
+      <p class="hint" style="margin:0;">
+        Lower this if the same person is being split into too many small groups. Raise it if
+        different people are getting merged into one group. Re-groups instantly &mdash; no need to
+        recompute embeddings.
+      </p>
+    </div>
+  </section>
+
+  <section id="clusters-section" class="hidden">
+    <h2>Grouped faces <span class="count" id="clusters-count"></span></h2>
+    <div id="clusters-container"></div>
+  </section>
+
+  <section id="ungrouped-section" class="hidden">
+    <h2>Ungrouped <span class="count" id="ungrouped-count"></span></h2>
+    <p class="hint">Didn't cluster with anything else at this threshold.</p>
+    <div id="ungrouped-grid" class="grid"></div>
+  </section>
+
+  <section id="no-results-section" class="hidden">
+    <p class="hint" id="no-results-text"></p>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/common.js"></script>
+<script src="/cluster.js"></script>
+</body>
+</html>
