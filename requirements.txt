@@ -5,3 +5,4 @@ insightface
 onnxruntime
 opencv-python-headless
 numpy
+cryptography

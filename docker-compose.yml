@@ -8,4 +8,8 @@ services:
       # (copy .env.example -> .env) rather than editing this directly, so
       # `git pull` doesn't conflict with your local config.
       - PROTECT_HOST=${PROTECT_HOST:-192.168.1.1}
+    volumes:
+      # Persists the self-signed HTTPS cert across container rebuilds, so
+      # you're not re-accepting a new browser security warning every time.
+      - ./certs:/app/certs
     restart: unless-stopped

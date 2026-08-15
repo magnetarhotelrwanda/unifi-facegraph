@@ -32,6 +32,23 @@ controller/firmware the way the other four endpoints have. If login fails
 unexpectedly, capture the real login request in DevTools and adjust
 `perform_login()` in [app.py](app.py) to match.
 
+## HTTPS
+
+The app is **HTTPS-only** — there's no plain-HTTP listener at all, so make
+sure you're using `https://`, not `http://`. On first run it generates its
+own self-signed certificate into `./certs` (see
+[cert_utils.py](cert_utils.py)) and reuses it on every subsequent start, so
+you're not re-trusting a new cert on every restart.
+
+Being self-signed, your browser will still show a one-time "not secure" /
+"proceed anyway" warning per browser/device the first time you visit —
+that's inherent to any self-signed cert (no publicly-trusted CA signed it),
+not something this app can avoid on a private LAN IP. It gets you an
+encrypted connection, not a green padlock. If you want to get rid of the
+browser warning entirely, put a reverse proxy (Caddy, nginx, Traefik) with
+a real cert in front of this app — not set up here, since it needs a
+public domain pointed at your server.
+
 ## Setup
 
 Two ways to run this: directly with Python, or in Docker. Both need nothing
@@ -70,7 +87,7 @@ in-page login screen (see [Auth](#auth) below), never stored on disk.
    python3 app.py
    ```
 
-6. Open [http://127.0.0.1:5151](http://127.0.0.1:5151) and log in with your
+6. Open [https://127.0.0.1:5151](https://127.0.0.1:5151) and log in with your
    controller username/password.
 
 By default the server only binds to `127.0.0.1` (this machine only). To make
@@ -101,21 +118,19 @@ docker build -t unifi-facegraph .
 docker run -d -p 5151:5151 -e PROTECT_HOST=192.168.1.1 --name unifi-facegraph unifi-facegraph
 ```
 
-Then open [http://127.0.0.1:5151](http://127.0.0.1:5151) (or
-`http://<your-server-ip>:5151` if running on a remote machine) and log in.
+Then open [https://127.0.0.1:5151](https://127.0.0.1:5151) (or
+`https://<your-server-ip>:5151` if running on a remote machine) and log in.
 
 The model download (`download_model.py`) runs automatically during
 `docker build`, not at container startup — so `docker build` itself is slow
 the first time (dependency install + ~182MB model download), but starting/
 restarting the container afterward is instant.
 
-**Note**: the Dockerfile hasn't been build-tested in this environment (no
-Docker available here) — it follows a standard `python:3.11-slim` +
-`pip install -r requirements.txt` pattern, but give it a real build/run
-before relying on it, and check `docker logs` if `opencv`/`onnxruntime`
-complain about missing system libraries (a few common ones are
-pre-installed in the image, but your combination of package versions might
-need one more).
+**Note**: build/run-tested on Ubuntu (`docker compose up -d --build`). If
+`opencv`/`onnxruntime` complain about a missing shared library in `docker
+compose logs`, it's the same class of issue as `libgl1` below — add
+whatever's missing to the `apt-get install` line in the
+[Dockerfile](Dockerfile).
 
 ### Environment variables
 
@@ -209,7 +224,7 @@ it for you).
   endpoint's much larger NVR/system state blob to the browser. Fetched once
   per session and cached client-side, since the camera list rarely changes.
 
-## Local face recognition ([/recognize](http://127.0.0.1:5151/recognize))
+## Local face recognition ([/recognize](https://127.0.0.1:5151/recognize))
 
 A separate page that runs its own local face-recognition model against your
 photos — **deliberately not using any of UniFi's own recognition data or
@@ -265,7 +280,7 @@ opinion, not reusing the same one).
   caching of embeddings), and results live only in server memory until the
   process restarts.
 
-## Clustering unknowns against each other ([/cluster](http://127.0.0.1:5151/cluster))
+## Clustering unknowns against each other ([/cluster](https://127.0.0.1:5151/cluster))
 
 A third page for the opposite problem: a recurring face that was never
 assigned to anyone (e.g. "the postman") won't show up on the recognition
@@ -313,10 +328,13 @@ instead compares unknown faces **against each other**.
 ```
 app.py                  Flask backend (proxies Protect API, handles login/recognition/clustering jobs, serves frontend)
 face_recognizer.py      Local InsightFace embedding logic (image bytes -> vector)
+cert_utils.py           Generates/reuses the self-signed HTTPS cert into ./certs
 download_model.py       One-time setup: downloads the InsightFace model pack into ./models
 models/                 InsightFace buffalo_l model pack (gitignored — run download_model.py to populate)
+certs/                  Self-signed HTTPS cert + key (gitignored — auto-generated on first run)
 config.example.json     Template — copy to config.json and fill in
 config.json              Your controller host (gitignored, not in repo — no credentials stored)
+.env.example             Template — copy to .env for Docker's PROTECT_HOST
 requirements.txt
 Dockerfile              Option B install (see Setup)
 docker-compose.yml       Option B install, with Compose

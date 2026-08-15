@@ -12,7 +12,9 @@ the server (or let the session expire) and you'll be prompted to log in
 again.
 
 Run with: python3 app.py
-Serves on APP_HOST:APP_PORT (default 127.0.0.1:5151).
+Serves HTTPS-only on APP_HOST:APP_PORT (default 127.0.0.1:5151), using a
+self-signed cert auto-generated into ./certs on first run (see
+cert_utils.py). There is no plain-HTTP listener.
 
 Controller host: set via config.json (direct installs) or the PROTECT_HOST
 env var (Docker) -- see README.md.
@@ -28,6 +30,7 @@ import requests
 import urllib3
 from flask import Flask, Response, jsonify, request, send_from_directory
 
+from cert_utils import ensure_self_signed_cert
 from face_recognizer import cosine_similarity, embed_image_bytes
 
 # The controller typically presents a self-signed cert on the LAN.
@@ -770,9 +773,15 @@ if __name__ == "__main__":
     # reachable via its published port regardless of the bind address).
     # FLASK_DEBUG defaults off: the Werkzeug debugger is a real remote-code-
     # execution risk if this ends up reachable beyond localhost.
+    #
+    # HTTPS-only, via a self-signed cert generated once into ./certs and
+    # reused on subsequent starts -- there is no plain-HTTP listener at all,
+    # so there's nothing to "block" separately.
+    cert_path, key_path = ensure_self_signed_cert()
     app.run(
         host=os.environ.get("APP_HOST", "127.0.0.1"),
         port=int(os.environ.get("APP_PORT", 5151)),
         debug=os.environ.get("FLASK_DEBUG", "false").lower() == "true",
         threaded=True,
+        ssl_context=(cert_path, key_path),
     )
