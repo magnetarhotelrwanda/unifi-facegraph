@@ -1,7 +1,10 @@
 FROM python:3.11-slim
 
-# Minimal system libs opencv-python-headless / onnxruntime need on Debian slim.
+# Minimal system libs opencv-python-headless / onnxruntime need on Debian
+# slim -- libgl1 in particular is still dlopen()'d by opencv at import time
+# even in the "headless" build, despite never actually rendering anything.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
     libgomp1 \
     libglib2.0-0 \
     libsm6 \
