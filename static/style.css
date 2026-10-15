@@ -182,6 +182,41 @@ h2 {
   gap: 12px;
 }
 
+.pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.pagination:empty {
+  display: none;
+}
+
+.page-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 4px 10px;
+  font-size: 13px;
+  min-width: 34px;
+}
+
+.page-btn.current {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+  opacity: 1;
+  cursor: default;
+}
+
+.page-loading {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 0 4px;
+}
+
 .card {
   background: var(--panel);
   border: 1px solid var(--border);

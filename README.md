@@ -165,13 +165,20 @@ it for you).
   exclude freshly-promoted `face_degraded_...` groups (i.e. newly-created
   people wouldn't show up here even though the create succeeded on the
   controller).
-- **Unknown Detections** grid — loads *every* face detection (`GET
-  /api/detections` → `/proxy/protect/api/detection-search`, paged backwards
-  in time with `start`/`end` until the controller returns nothing older),
-  then the
-  **frontend** flattens each event's `detectedThumbnails[]` and buckets faces
+- **Unknown Detections** grid — paginated, 1000 faces per numbered page,
+  newest first (`GET /api/unknowns?page=N`). On first load the backend
+  starts reading the *whole* face history from
+  `/proxy/protect/api/detection-search` in a background thread, walking
+  backwards in time windows (`start`/`end`, resized to keep each response
+  to a few hundred events), and keeps the unknown faces in memory. Page 1
+  shows as soon as its first 1000 faces are in; more page tabs appear as
+  the read continues. Changing pages is then instant. **Refresh** re-reads
+  everything from the controller. Faces you assign or name here drop out
+  of the list straight away; faces that *become* unknown (unassigning,
+  deleting a person) appear after a Refresh. The backend flattens each
+  event's `detectedThumbnails[]` and buckets faces
   as unknown when that thumbnail's `labels[]` contains `"groupType:unknown"`.
-  This bucketing intentionally happens client-side rather than via a
+  This bucketing intentionally happens on our side rather than via a
   server-side "unknown" filter param, since no such param has been confirmed
   against the real API. (Earlier versions checked the `group.id` prefix
   instead — that was wrong: a named person's group id permanently keeps its

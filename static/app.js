@@ -31,14 +31,24 @@ const groupDetailGrid = document.getElementById("group-detail-grid");
 const groupDetailSelectedCountEl = document.getElementById("group-detail-selected-count");
 const groupDetailUnassignBtn = document.getElementById("group-detail-unassign");
 const groupDetailReassignGrid = document.getElementById("group-detail-reassign-grid");
+const unknownPagesTop = document.getElementById("unknown-pages-top");
+const unknownPagesBottom = document.getElementById("unknown-pages-bottom");
 
 // Held only in memory for the duration of a login attempt (needed to
 // resubmit alongside a 2FA code); never written to disk or localStorage.
 let pendingCredentials = null;
 
 let groups = [];
-let unknownFaces = []; // flattened, one entry per unmatched face thumbnail
+let unknownFaces = []; // the current page only, one entry per unmatched face thumbnail
 const selected = new Set(); // objectIds currently selected
+
+// The server reads the full unknown history in the background and serves it
+// in pages; these mirror its /api/unknowns summary.
+let unknownPage = 1;
+let unknownPageReady = false;
+let unknownSummary = { total: 0, totalPages: 0, pageSize: 0, loading: false, error: null };
+let unknownPollTimer = null;
+const UNKNOWN_POLL_MS = 2000;
 
 let currentGroup = null;
 let groupDetailFaces = [];
@@ -46,13 +56,6 @@ const groupDetailSelected = new Set();
 
 function setStatus(text) {
   statusLine.textContent = text;
-}
-
-function isUnknownThumbnail(t) {
-  // group.id keeps its original "face_degraded_..." shape forever, even
-  // after a face is named -- the "groupType:known"/"groupType:unknown"
-  // label is the only reliable known/unknown signal (HAR-confirmed).
-  return (t.labels || []).includes("groupType:unknown");
 }
 
 // --- Known faces ---------------------------------------------------------
@@ -120,10 +123,7 @@ async function assignSelectedTo(group) {
       body: JSON.stringify({ objectIds, groupId: group.id }),
     });
 
-    unknownFaces = unknownFaces.filter((f) => !selected.has(f.objectId));
-    selected.clear();
-    renderUnknownGrid();
-    updateSelectedCount();
+    removeUnknownFacesLocally(selected);
     showToast(`Assigned ${objectIds.length} detection(s) to ${group.name || group.matchedName}.`);
   } catch (err) {
     cardsToRemove.forEach((c) => c.classList.remove("assigning"));
@@ -139,16 +139,144 @@ async function assignSelectedTo(group) {
 
 function renderUnknownGrid() {
   unknownGrid.innerHTML = "";
-  unknownCountEl.textContent = `(${unknownFaces.length})`;
+  renderUnknownCount();
 
+  if (!unknownPageReady) {
+    unknownGrid.innerHTML = '<div class="empty-state">Loading this page from the controller…</div>';
+    return;
+  }
   if (unknownFaces.length === 0) {
-    unknownGrid.innerHTML = '<div class="empty-state">No unknown detections. Nice and tidy.</div>';
+    const msg = unknownSummary.total === 0 ? "No unknown detections. Nice and tidy." : "Nothing left on this page.";
+    unknownGrid.innerHTML = `<div class="empty-state">${msg}</div>`;
     return;
   }
 
   for (const face of unknownFaces) {
     unknownGrid.appendChild(createFaceCard(face, selected, updateSelectedCount));
   }
+}
+
+function renderUnknownCount() {
+  const total = unknownSummary.total.toLocaleString();
+  unknownCountEl.textContent = unknownSummary.loading ? `(${total} so far, still loading…)` : `(${total})`;
+}
+
+function renderUnknownPagination() {
+  for (const nav of [unknownPagesTop, unknownPagesBottom]) {
+    nav.innerHTML = "";
+    const knownPages = Math.max(unknownSummary.totalPages, unknownPage);
+    if (knownPages <= 1 && !unknownSummary.loading) continue;
+
+    const addButton = (label, page, { current = false, disabled = false } = {}) => {
+      const btn = document.createElement("button");
+      btn.className = "page-btn" + (current ? " current" : "");
+      btn.textContent = label;
+      btn.disabled = disabled || current;
+      if (current) btn.setAttribute("aria-current", "page");
+      btn.addEventListener("click", () => goToUnknownPage(page));
+      nav.appendChild(btn);
+    };
+
+    addButton("‹ Prev", unknownPage - 1, { disabled: unknownPage <= 1 });
+    for (let p = 1; p <= knownPages; p++) {
+      addButton(String(p), p, { current: p === unknownPage });
+    }
+    if (unknownSummary.loading) {
+      const more = document.createElement("span");
+      more.className = "page-loading";
+      more.textContent = "more loading…";
+      nav.appendChild(more);
+    }
+    addButton("Next ›", unknownPage + 1, {
+      disabled: unknownPage >= unknownSummary.totalPages,
+    });
+  }
+}
+
+function removeUnknownFacesLocally(objectIds) {
+  const ids = new Set(objectIds);
+  const before = unknownFaces.length;
+  unknownFaces = unknownFaces.filter((f) => !ids.has(f.objectId));
+  unknownSummary.total = Math.max(0, unknownSummary.total - (before - unknownFaces.length));
+  selected.clear();
+  renderUnknownGrid();
+  updateSelectedCount();
+}
+
+async function goToUnknownPage(page) {
+  if (page < 1 || page === unknownPage) return;
+  unknownPage = page;
+  selected.clear();
+  updateSelectedCount();
+  await loadUnknownPage();
+  unknownSection.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function loadUnknownPage() {
+  const requestedPage = unknownPage;
+  const res = await fetchJSON(`/api/unknowns?page=${requestedPage}`);
+  if (requestedPage !== unknownPage) return; // user clicked another tab meanwhile
+
+  applyUnknownSummary(res);
+  unknownPageReady = res.ready;
+  unknownFaces = res.ready ? res.faces : [];
+  if (res.ready && unknownFaces.length === 0 && unknownPage > Math.max(1, res.totalPages)) {
+    // Page no longer exists (e.g. faces were assigned) -- go to the last one.
+    unknownPage = Math.max(1, res.totalPages);
+    return loadUnknownPage();
+  }
+  renderUnknownGrid();
+  renderUnknownPagination();
+  updateStatusLine();
+  scheduleUnknownPoll();
+}
+
+function applyUnknownSummary(summary) {
+  const hadError = unknownSummary.error;
+  unknownSummary = {
+    total: summary.total,
+    totalPages: summary.totalPages,
+    pageSize: summary.pageSize,
+    loading: summary.loading,
+    error: summary.error,
+  };
+  if (summary.error && summary.error !== hadError) {
+    showToast(`Stopped loading unknown faces: ${summary.error}. Use Refresh to try again.`, true);
+  }
+}
+
+function scheduleUnknownPoll() {
+  clearTimeout(unknownPollTimer);
+  if (!unknownSummary.loading) return;
+  unknownPollTimer = setTimeout(pollUnknowns, UNKNOWN_POLL_MS);
+}
+
+async function pollUnknowns() {
+  try {
+    if (!unknownPageReady) {
+      await loadUnknownPage(); // reschedules itself
+      return;
+    }
+    // Current page is already on screen -- just grow the tabs, without
+    // re-rendering the grid (which would drop the user's selection).
+    applyUnknownSummary(await fetchJSON("/api/unknowns/status"));
+    renderUnknownCount();
+    renderUnknownPagination();
+    updateStatusLine();
+    scheduleUnknownPoll();
+  } catch (err) {
+    if (err instanceof AuthRequiredError) {
+      showLoginScreen("Your session expired. Please log in again.");
+      return;
+    }
+    scheduleUnknownPoll();
+  }
+}
+
+function updateStatusLine() {
+  const total = unknownSummary.total.toLocaleString();
+  const suffix = unknownSummary.loading ? " (loading…)" : "";
+  setStatus(`Loaded ${groups.length} known / ${total} unknown${suffix}`);
 }
 
 function updateSelectedCount() {
@@ -179,32 +307,23 @@ function extractFaceThumbnails(events, predicate) {
   return faces;
 }
 
-function flattenUnknownFaces(events) {
-  return extractFaceThumbnails(events, isUnknownThumbnail);
-}
-
 function flattenGroupFaces(events, groupId) {
   return extractFaceThumbnails(events, (t) => t.group?.id === groupId);
 }
 
+async function loadGroups() {
+  const groupsRes = await fetchJSON("/api/groups");
+  groups = groupsRes.groups || groupsRes.data || (Array.isArray(groupsRes) ? groupsRes : []);
+  renderKnownGrid();
+}
+
 async function loadAll() {
   setStatus("Loading…");
+  selected.clear();
+  updateSelectedCount();
   try {
-    const [groupsRes, detectionsRes] = await Promise.all([
-      fetchJSON("/api/groups"),
-      fetchJSON("/api/detections"),
-      loadCameras(),
-    ]);
-
-    groups = groupsRes.groups || groupsRes.data || (Array.isArray(groupsRes) ? groupsRes : []);
-    const events = detectionsRes.events || detectionsRes.data || (Array.isArray(detectionsRes) ? detectionsRes : []);
-    unknownFaces = flattenUnknownFaces(events);
-    selected.clear();
-
-    renderKnownGrid();
-    renderUnknownGrid();
-    updateSelectedCount();
-    setStatus(`Loaded ${groups.length} known / ${unknownFaces.length} unknown`);
+    await Promise.all([loadGroups(), loadCameras()]);
+    await loadUnknownPage();
   } catch (err) {
     if (err instanceof AuthRequiredError) {
       showLoginScreen("Your session expired. Please log in again.");
@@ -228,6 +347,7 @@ function resetToCredentialsStep() {
 }
 
 function showLoginScreen(message) {
+  clearTimeout(unknownPollTimer);
   appContent.classList.add("hidden");
   refreshBtn.classList.add("hidden");
   logoutBtn.classList.add("hidden");
@@ -524,10 +644,11 @@ createPersonBtn.addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ anchorGroupId: anchor.groupId, objectIds, name }),
     });
-    selected.clear();
+    removeUnknownFacesLocally(objectIds);
     createPersonNameInput.value = "";
     showToast(`Created "${name}" from ${objectIds.length} detection(s).`);
-    await loadAll();
+    await loadGroups();
+    updateStatusLine();
   } catch (err) {
     if (err instanceof AuthRequiredError) {
       showLoginScreen("Your session expired. Please log in again.");
@@ -539,5 +660,17 @@ createPersonBtn.addEventListener("click", async () => {
   }
 });
 
-refreshBtn.addEventListener("click", loadAll);
+refreshBtn.addEventListener("click", async () => {
+  // Re-reads the whole unknown history from the controller, from page 1.
+  try {
+    await fetchJSON("/api/unknowns/refresh", { method: "POST" });
+  } catch (err) {
+    if (err instanceof AuthRequiredError) {
+      showLoginScreen("Your session expired. Please log in again.");
+      return;
+    }
+  }
+  unknownPage = 1;
+  await loadAll();
+});
 checkAuthAndLoad();

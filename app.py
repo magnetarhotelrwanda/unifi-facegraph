@@ -286,6 +286,7 @@ def auth_login():
         return jsonify({"error": "Two-factor authentication code required", "mfaRequired": True}), 401
     if result == "failed":
         return jsonify({"error": f"Login failed (controller returned {status_code})"}), 401
+    _restart_unknown_cache(start_loading=False)
     return jsonify({"authenticated": True})
 
 
@@ -293,6 +294,7 @@ def auth_login():
 def auth_logout():
     session_state["cookie"] = None
     session_state["csrf_token"] = None
+    _restart_unknown_cache(start_loading=False)
     return jsonify({"authenticated": False})
 
 
@@ -321,64 +323,199 @@ def get_groups():
     return proxied_json_response(upstream)
 
 
-MAX_DETECTION_PAGES = 500
+MAX_DETECTION_REQUESTS = 5000
+INITIAL_WINDOW_MS = 6 * 60 * 60 * 1000
+MIN_WINDOW_MS = 60 * 1000
+TARGET_EVENTS_PER_REQUEST = (100, 500)
 
 
-def _fetch_detection_events(labels, start=0, end=None):
+def _iter_detection_batches(labels, start=0, end=None):
     """
-    Every detection-search event in [start, end], newest first.
+    Yield batches of detection-search events in [start, end], newest first.
 
     The controller caps "limit" at 100, so the only way to see further back
-    is a start/end range. Whether a range request is itself silently capped
-    isn't confirmed, so this walks backwards: after each response, the next
-    request's end is moved to just before the oldest event received, until a
-    response comes back empty (or stops making progress). If the controller
-    does return the whole range in one go, that's just one extra empty call.
+    is a start/end range. Asking for the whole range at once can mean one
+    enormous response (slow to arrive, and nothing to show until it does),
+    so this walks backwards in time windows instead, resizing the window to
+    keep each response at a few hundred events: it doubles across quiet or
+    empty stretches (so reaching the start of history is quick) and halves
+    when a window comes back too full.
+
+    Whether a range response is itself silently capped isn't confirmed, so
+    the next window always ends just before the oldest event received
+    rather than at the previous window's start -- if the controller did
+    truncate, the walk picks up exactly where it left off.
     """
     if end is None:
         end = int(time.time() * 1000)
-    events = []
     seen_ids = set()
-    for _ in range(MAX_DETECTION_PAGES):
+    window = INITIAL_WINDOW_MS
+    for _ in range(MAX_DETECTION_REQUESTS):
+        if end < start:
+            return
+        window_start = max(start, end - window)
         resp = controller_get(
             "/proxy/protect/api/detection-search",
             params={
                 "excludeMotion": "true",
                 "labels": labels,
                 "orderDirection": "DESC",
-                "start": start,
+                "start": window_start,
                 "end": end,
             },
         )
         if resp.status_code != 200:
-            if not events:
-                raise UpstreamError(resp)
-            break
+            raise UpstreamError(resp)
         batch = resp.json().get("events", [])
         new = [e for e in batch if e.get("id") not in seen_ids]
-        if not new:
-            break
         for e in new:
             seen_ids.add(e.get("id"))
-        events.extend(new)
+        if new:
+            yield new
+
         oldest = min((e.get("start") for e in new if e.get("start") is not None), default=None)
-        if oldest is None or oldest - 1 >= end or oldest <= start:
-            break
-        end = oldest - 1
+        if oldest is not None and window_start < oldest <= end:
+            end = oldest - 1
+        else:
+            if window_start <= start:
+                return
+            end = window_start - 1
+
+        if len(batch) > TARGET_EVENTS_PER_REQUEST[1]:
+            window = max(MIN_WINDOW_MS, window // 2)
+        elif len(batch) < TARGET_EVENTS_PER_REQUEST[0]:
+            window *= 2
+
+
+def _fetch_detection_events(labels, start=0, end=None):
+    events = []
+    for batch in _iter_detection_batches(labels, start, end):
+        events.extend(batch)
     return events
 
 
-@app.route("/api/detections")
-def get_detections():
-    """
-    Every face detection the controller has (all pages, see
-    _fetch_detection_events). Known vs. unknown bucketing happens
-    client-side in app.js based on each thumbnail's
-    "groupType:known"/"groupType:unknown" label, since a server-side
-    "unknown" filter for this endpoint hasn't been confirmed against the
-    real API.
-    """
-    return jsonify({"events": _fetch_detection_events("smartDetectType:face")})
+def _unknown_faces_from_events(events):
+    faces = []
+    for event in events:
+        for t in event.get("metadata", {}).get("detectedThumbnails", []):
+            if t.get("type") != "face":
+                continue
+            if "groupType:unknown" not in (t.get("labels") or []):
+                continue
+            faces.append(
+                {
+                    "objectId": t.get("objectId"),
+                    "croppedId": t.get("croppedId"),
+                    "groupId": (t.get("group") or {}).get("id"),
+                    "confidence": t.get("confidence"),
+                    "qualityScore": (t.get("attributes") or {}).get("qualityScore"),
+                    "camera": event.get("camera"),
+                    "timestamp": event.get("start"),
+                }
+            )
+    return faces
+
+
+# --- Unknown faces cache (main page) ---------------------------------------
+#
+# The full unknown history can be tens of thousands of faces -- far too many
+# to fetch per page view. A background thread reads it newest-first into
+# memory and the main page is served from that in UNKNOWN_PAGE_SIZE pages,
+# so page 1 is ready as soon as the first ~1000 faces are in, while later
+# page tabs appear as the walk continues. Re-read only on an explicit
+# Refresh (or after logging in again). Faces assigned through this app are
+# dropped from the cache as they go; faces that *become* unknown (unassign,
+# deleting a person) only show up after a Refresh.
+
+UNKNOWN_PAGE_SIZE = 1000
+
+unknown_cache_lock = threading.Lock()
+unknown_cache = {"generation": 0, "status": "idle", "faces": [], "error": None}
+
+
+def _load_unknown_cache(generation):
+    try:
+        for batch in _iter_detection_batches("smartDetectType:face"):
+            faces = _unknown_faces_from_events(batch)
+            with unknown_cache_lock:
+                if unknown_cache["generation"] != generation:
+                    return  # superseded by a Refresh or logout
+                unknown_cache["faces"].extend(faces)
+        status, error = "done", None
+    except NotAuthenticated:
+        status, error = "error", "Not logged in"
+    except UpstreamError as exc:
+        status, error = "error", f"Controller returned {exc.response.status_code}"
+    except Exception as exc:
+        status, error = "error", str(exc)
+    with unknown_cache_lock:
+        if unknown_cache["generation"] == generation:
+            unknown_cache["status"] = status
+            unknown_cache["error"] = error
+
+
+def _restart_unknown_cache(start_loading=True):
+    with unknown_cache_lock:
+        unknown_cache["generation"] += 1
+        unknown_cache["faces"] = []
+        unknown_cache["error"] = None
+        unknown_cache["status"] = "loading" if start_loading else "idle"
+        generation = unknown_cache["generation"]
+    if start_loading:
+        threading.Thread(target=_load_unknown_cache, args=(generation,), daemon=True).start()
+
+
+def _drop_from_unknown_cache(object_ids):
+    ids = set(object_ids)
+    with unknown_cache_lock:
+        unknown_cache["faces"] = [f for f in unknown_cache["faces"] if f["objectId"] not in ids]
+
+
+def _unknown_cache_summary():
+    """Caller holds unknown_cache_lock."""
+    total = len(unknown_cache["faces"])
+    loading = unknown_cache["status"] == "loading"
+    # While loading, only count pages that are already full -- the last
+    # partial one is still growing.
+    total_pages = total // UNKNOWN_PAGE_SIZE if loading else max(1, -(-total // UNKNOWN_PAGE_SIZE))
+    return {
+        "pageSize": UNKNOWN_PAGE_SIZE,
+        "total": total,
+        "totalPages": total_pages,
+        "loading": loading,
+        "error": unknown_cache["error"],
+    }
+
+
+@app.route("/api/unknowns")
+def get_unknowns():
+    """One page (1-based) of unknown faces, newest first. "ready" is false
+    if that page hasn't finished loading yet -- poll again."""
+    if unknown_cache["status"] == "idle":
+        _restart_unknown_cache()
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except ValueError:
+        page = 1
+    with unknown_cache_lock:
+        summary = _unknown_cache_summary()
+        lo = (page - 1) * UNKNOWN_PAGE_SIZE
+        hi = lo + UNKNOWN_PAGE_SIZE
+        ready = not summary["loading"] or len(unknown_cache["faces"]) >= hi
+        faces = unknown_cache["faces"][lo:hi] if ready else []
+    return jsonify({**summary, "page": page, "ready": ready, "faces": faces})
+
+
+@app.route("/api/unknowns/status")
+def get_unknowns_status():
+    with unknown_cache_lock:
+        return jsonify(_unknown_cache_summary())
+
+
+@app.route("/api/unknowns/refresh", methods=["POST"])
+def refresh_unknowns():
+    _restart_unknown_cache()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/groups/<group_id>/detections")
@@ -444,6 +581,8 @@ def assign_group():
         "/proxy/protect/api/recognition/face/assign-group",
         {"objectIds": object_ids, "groupId": group_id},
     )
+    if upstream.ok:
+        _drop_from_unknown_cache(object_ids)
     return proxied_json_response(upstream)
 
 
@@ -490,6 +629,8 @@ def create_person():
         "/proxy/protect/api/recognition/face/assign-group",
         {"objectIds": object_ids, "groupId": anchor_group_id},
     )
+    if assign_upstream.ok:
+        _drop_from_unknown_cache(object_ids)
     return proxied_json_response(assign_upstream)
 
 
@@ -572,27 +713,7 @@ def _fetch_unknown_faces(start=None, end=None):
         events = _fetch_detection_events("smartDetectType:face", start or 0, end)
     except UpstreamError:
         return []
-    faces = []
-    for event in events:
-        for t in event.get("metadata", {}).get("detectedThumbnails", []):
-            if t.get("type") != "face":
-                continue
-            if "groupType:unknown" not in (t.get("labels") or []):
-                continue
-            if not t.get("croppedId"):
-                continue
-            faces.append(
-                {
-                    "objectId": t.get("objectId"),
-                    "croppedId": t.get("croppedId"),
-                    "groupId": (t.get("group") or {}).get("id"),
-                    "confidence": t.get("confidence"),
-                    "qualityScore": (t.get("attributes") or {}).get("qualityScore"),
-                    "camera": event.get("camera"),
-                    "timestamp": event.get("start"),
-                }
-            )
-    return faces
+    return [f for f in _unknown_faces_from_events(events) if f["croppedId"]]
 
 
 def _passes_quality_filter(quality_score):
