@@ -165,8 +165,10 @@ it for you).
   exclude freshly-promoted `face_degraded_...` groups (i.e. newly-created
   people wouldn't show up here even though the create succeeded on the
   controller).
-- **Unknown Detections** grid — loads recent face detections (`GET
-  /api/detections` → `/proxy/protect/api/detection-search`), then the
+- **Unknown Detections** grid — loads *every* face detection (`GET
+  /api/detections` → `/proxy/protect/api/detection-search`, paged backwards
+  in time with `start`/`end` until the controller returns nothing older),
+  then the
   **frontend** flattens each event's `detectedThumbnails[]` and buckets faces
   as unknown when that thumbnail's `labels[]` contains `"groupType:unknown"`.
   This bucketing intentionally happens client-side rather than via a
@@ -311,9 +313,6 @@ instead compares unknown faces **against each other**.
 
 ## Known gaps (prototype, not v1)
 
-- **No pagination on the main Unknown Detections feed.** It's still fetched
-  single-page with `limit=100`, unlike the recognition/clustering pages
-  which now support a full date range via `start`/`end`.
 - **Login endpoint is unconfirmed** (see Auth section above) — if it doesn't
   work against your controller out of the box, it likely just needs a small
   tweak based on a real HAR capture of your login flow.

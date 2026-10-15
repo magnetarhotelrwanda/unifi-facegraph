@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import requests
@@ -70,6 +71,12 @@ class NotAuthenticated(Exception):
     pass
 
 
+class UpstreamError(Exception):
+    def __init__(self, response):
+        super().__init__(response.status_code)
+        self.response = response
+
+
 @app.errorhandler(ControllerUnreachable)
 def handle_controller_unreachable(exc):
     return jsonify({"error": f"Could not reach controller: {exc}"}), 502
@@ -78,6 +85,11 @@ def handle_controller_unreachable(exc):
 @app.errorhandler(NotAuthenticated)
 def handle_not_authenticated(exc):
     return jsonify({"error": "Not logged in", "requiresLogin": True}), 401
+
+
+@app.errorhandler(UpstreamError)
+def handle_upstream_error(exc):
+    return proxied_json_response(exc.response)
 
 
 def _decode_csrf_from_jwt(token_cookie_value):
@@ -309,25 +321,64 @@ def get_groups():
     return proxied_json_response(upstream)
 
 
+MAX_DETECTION_PAGES = 500
+
+
+def _fetch_detection_events(labels, start=0, end=None):
+    """
+    Every detection-search event in [start, end], newest first.
+
+    The controller caps "limit" at 100, so the only way to see further back
+    is a start/end range. Whether a range request is itself silently capped
+    isn't confirmed, so this walks backwards: after each response, the next
+    request's end is moved to just before the oldest event received, until a
+    response comes back empty (or stops making progress). If the controller
+    does return the whole range in one go, that's just one extra empty call.
+    """
+    if end is None:
+        end = int(time.time() * 1000)
+    events = []
+    seen_ids = set()
+    for _ in range(MAX_DETECTION_PAGES):
+        resp = controller_get(
+            "/proxy/protect/api/detection-search",
+            params={
+                "excludeMotion": "true",
+                "labels": labels,
+                "orderDirection": "DESC",
+                "start": start,
+                "end": end,
+            },
+        )
+        if resp.status_code != 200:
+            if not events:
+                raise UpstreamError(resp)
+            break
+        batch = resp.json().get("events", [])
+        new = [e for e in batch if e.get("id") not in seen_ids]
+        if not new:
+            break
+        for e in new:
+            seen_ids.add(e.get("id"))
+        events.extend(new)
+        oldest = min((e.get("start") for e in new if e.get("start") is not None), default=None)
+        if oldest is None or oldest - 1 >= end or oldest <= start:
+            break
+        end = oldest - 1
+    return events
+
+
 @app.route("/api/detections")
 def get_detections():
     """
-    Raw detection-search passthrough (single page, limit=100 - see README
-    "Known gaps"). Known vs. unknown bucketing happens client-side in app.js
-    based on each thumbnail's "groupType:known"/"groupType:unknown" label,
-    since a server-side "unknown" filter for this endpoint hasn't been
-    confirmed against the real API.
+    Every face detection the controller has (all pages, see
+    _fetch_detection_events). Known vs. unknown bucketing happens
+    client-side in app.js based on each thumbnail's
+    "groupType:known"/"groupType:unknown" label, since a server-side
+    "unknown" filter for this endpoint hasn't been confirmed against the
+    real API.
     """
-    upstream = controller_get(
-        "/proxy/protect/api/detection-search",
-        params={
-            "excludeMotion": "true",
-            "labels": "smartDetectType:face",
-            "limit": 100,
-            "orderDirection": "DESC",
-        },
-    )
-    return proxied_json_response(upstream)
+    return jsonify({"events": _fetch_detection_events("smartDetectType:face")})
 
 
 @app.route("/api/groups/<group_id>/detections")
@@ -517,21 +568,10 @@ def _fetch_group_reference_faces(group):
 
 
 def _fetch_unknown_faces(start=None, end=None):
-    params = {
-        "excludeMotion": "true",
-        "labels": "smartDetectType:face",
-        "orderDirection": "DESC",
-    }
-    if start is not None and end is not None:
-        params["start"] = start
-        params["end"] = end
-    else:
-        params["limit"] = 100
-
-    resp = controller_get("/proxy/protect/api/detection-search", params=params)
-    if resp.status_code != 200:
+    try:
+        events = _fetch_detection_events("smartDetectType:face", start or 0, end)
+    except UpstreamError:
         return []
-    events = resp.json().get("events", [])
     faces = []
     for event in events:
         for t in event.get("metadata", {}).get("detectedThumbnails", []):

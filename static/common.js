@@ -102,6 +102,7 @@ function createFaceCard(face, selectedSet, onToggle) {
     img.className = "detection-thumb";
     img.src = `/api/detection-image/${encodeURIComponent(face.croppedId)}`;
     img.alt = "Face detection";
+    img.loading = "lazy";
     img.onerror = () => {
       img.replaceWith(makeThumbFallback());
     };
